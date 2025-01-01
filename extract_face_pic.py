@@ -12,9 +12,13 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Load the cascade classifier
 face_classifier = cv2.CascadeClassifier('data/haarcascades/haarcascade_frontalface_default.xml')
+
+# Specify Tesseract executable path
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-def process_image(file_path):
+
+# Function to extract images from a PNG, JPG, etc.,
+def extract_images_from_pic(file_path):
     # Load the image and convert it to grayscale
     image = cv2.imread(file_path)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -50,18 +54,19 @@ def process_image(file_path):
             face_filename = os.path.join(output_dir, f'{name} {i + 1}.jpg')
             cv2.imwrite(face_filename, face_roi)
 
+            print(f"Saved face: {face_filename}")
 
-def process_folder():
+
+def process_input():
     # Iterate through all files in the input folder
     for filename in os.listdir(input_folder):
         file_path = os.path.join(input_folder, filename)
 
         if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            process_image(file_path)
+            extract_images_from_pic(file_path)
         else:
             print(f"Unsupported file type: {filename}")
 
 
 if __name__ == "__main__":
-    process_folder()
-
+    process_input()
