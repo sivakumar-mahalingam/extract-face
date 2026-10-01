@@ -1,49 +1,40 @@
-# Extract Face
-Extracts face image from ID cards and stores it
+﻿# Emirates ID extractor
 
-## **Setup Instructions**
+Reads the **English name** and Emirates ID number from card fronts, saves each printed portrait as a JPEG, and creates an Excel workbook.
 
-### **1. Install Tesseract OCR**
-1. Download the Tesseract OCR installer from the link below:
-   - [Tesseract OCR 5.5.0 for Windows](https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe)
-2. Run the installer and follow the instructions to complete the installation.
-   - **Important:** During installation, ensure you check the option to add Tesseract to the system PATH.
-3. After installation, verify that Tesseract is installed correctly by running the following command in the **Command Prompt**:
-   ```bash
-   tesseract --version
-   ```
-   You should see the version details printed.
+## Input folder
 
-### **2. Clone the Python Repository**
-1. Navigate to the repository directory:
-   ```bash
-   cd <repository-directory>
-   ```
+Place Emirates ID files directly in `input/`. The extractor processes supported files in that folder: `jpg`, `jpeg`, `png`, `bmp`, `tif`, `tiff`, `webp`, and `pdf`. Put one card front in each image or PDF page. A PDF can contain multiple pages; each page gets its own workbook row. The input files are not changed.
 
-### **3. Set Up PyCharm**
-1. Open **PyCharm** and select **Open** to open the repository.
-2. Set up a **virtual environment**:
-   - Go to **File > Settings > Project > Python Interpreter**.
-   - Click on the gear icon and select **Add Interpreter > Add Local Interpreter**.
-   - Choose **Virtualenv** and click **OK** to create and configure the virtual environment.
-3. Activate the virtual environment:
-   - Open the **Terminal** within PyCharm and run:
-     ```bash
-     venv\Scripts\activate
-     ```
+## Output folder
 
-### **4. Install Dependencies**
-1. Make sure `pip` is updated:
-   ```bash
-   python -m pip install --upgrade pip
-   ```
-2. Install all the required packages listed in the `requirements.txt` file:
-   ```bash
-   pip install -r requirements.txt
-   ```
+The extractor creates `output/` automatically:
 
-#### **5. Run Your Code**
-1. To test if everything is set up correctly, try running a script in your repository (for example, a test script or the main application script).
-   ```bash
-   python <test_script>.py
-   ```
+```text
+output/
+  emirates_ids.xlsx  # Source file, page, English name, ID number, photo path, status, details
+  photos/            # Portrait JPEGs named after the English name
+```
+
+Repeated names get `_2`, `_3`, etc. The `Status` and `Details` columns flag fields or photos that need review; missing values are left blank. Running the extractor again updates photos with the same generated names and replaces the workbook.
+
+## Install
+
+Python 3.11 or 3.12 is recommended. No Tesseract installation or API key is required; the OCR model runs locally. With `uv` installed:
+
+```powershell
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+```
+
+## Run
+
+```powershell
+.venv\Scripts\python.exe extract_emirates_ids.py
+```
+
+To choose different folders:
+
+```powershell
+.venv\Scripts\python.exe extract_emirates_ids.py --input C:\cards --output C:\results
+```
