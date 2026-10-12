@@ -1,4 +1,4 @@
-"""Extract English names, ID numbers, and portrait photos from Emirates ID cards."""
+"""Extract Emirates ID fields, portrait photos, and valid full ID-card images."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ class Result:
     name: str = ""
     id_number: str = ""
     photo: str = ""
+    id_image: str = ""
     status: str = "review"
     details: str = ""
 
@@ -71,7 +72,9 @@ def images_in_file(path: Path):
 
 
 def read_lines(image: Image.Image, engine: RapidOCR) -> list[TextLine]:
-    raw, _ = engine(np.asarray(image))
+    # Keep text in its physical orientation: auto-flipping individual OCR crops
+    # would make an upside-down card look readable without rotating the card.
+    raw, _ = engine(np.asarray(image), use_cls=False)
     lines = []
     for box, text, confidence in raw or []:
         xs = [point[0] for point in box]
@@ -86,6 +89,56 @@ def english_name(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" .'-")
 
 
+def name_from_lines(label: TextLine, lines: list[TextLine]) -> tuple[str, float]:
+    """Read the English name block, including rows above a centered label."""
+    match = NAME_PATTERN.search(label.text)
+    inline = english_name(match[1]) if match else ""
+    height = max(label.height, 1.0)
+    # For a two-row name, the first row starts within one label height.
+    # The Arabic name sits above it and can occasionally be misread as Latin.
+    top = label.y - height
+    bottom = label.y + 3 * height
+    field_pattern = re.compile(
+        r"\b(?:ID\s*Number|Date\s*of\s*Birth|Nationality|Issuing\s*Date|"
+        r"Expiry\s*Date|Sex|Signature)\b", re.IGNORECASE
+    )
+    # Stop at adjacent fields even when their values are separate OCR boxes.
+    for other in lines:
+        if ID_PATTERN.search(other.text) or field_pattern.search(other.text):
+            if other.y + other.height <= label.y:
+                top = max(top, other.y + other.height)
+            elif other.y > label.y:
+                bottom = min(bottom, other.y)
+
+    parts = [(label, inline)] if inline else []
+    for other in lines:
+        if other is label or NAME_PATTERN.search(other.text) or field_pattern.search(other.text):
+            continue
+        if not (top <= other.y < bottom and other.x > label.x + height):
+            continue
+        # Arabic text and dates are not English name continuations.
+        if not re.fullmatch(r"[A-Za-z .'-]+", other.text.strip()):
+            continue
+        value = english_name(other.text)
+        if value:
+            parts.append((other, value))
+    if not parts:
+        return "", 0.0
+
+    # Group boxes on the same row before sorting horizontally. The label may
+    # sit slightly lower than an inline name box due to OCR box geometry.
+    parts.sort(key=lambda item: (item[0].y, item[0].x))
+    rows = []
+    for part in parts:
+        if rows and abs(part[0].y - rows[-1][0][0].y) < 0.5 * max(part[0].height, rows[-1][0][0].height):
+            rows[-1].append(part)
+        else:
+            rows.append([part])
+    ordered = [part for row in rows for part in sorted(row, key=lambda item: item[0].x)]
+    name = " ".join(value for _, value in ordered).title()
+    return name, min(part.confidence for part, _ in ordered)
+
+
 def fields_from_lines(lines: list[TextLine]) -> tuple[str, str, float, float]:
     ids = []
     names = []
@@ -93,15 +146,10 @@ def fields_from_lines(lines: list[TextLine]) -> tuple[str, str, float, float]:
         match = ID_PATTERN.search(line.text)
         if match:
             ids.append((f"784-{match[1]}-{match[2]}-{match[3]}", line.confidence))
-        match = NAME_PATTERN.search(line.text)
-        if match:
-            name = english_name(match[1])
-            if not name:
-                neighbors = [other for other in lines if other.x > line.x and abs(other.y - line.y) < max(other.height, line.height)]
-                if neighbors:
-                    name = english_name(min(neighbors, key=lambda other: other.x).text)
+        if NAME_PATTERN.search(line.text):
+            name, confidence = name_from_lines(line, lines)
             if name:
-                names.append((name, line.confidence))
+                names.append((name, confidence))
     name, name_score = max(names, key=lambda item: item[1], default=("", 0.0))
     id_number, id_score = max(ids, key=lambda item: item[1], default=("", 0.0))
     return name, id_number, name_score, id_score
@@ -109,17 +157,49 @@ def fields_from_lines(lines: list[TextLine]) -> tuple[str, str, float, float]:
 
 def extract_fields(image: Image.Image, engine: RapidOCR):
     best = ("", "", 0.0, 0.0, image)
-    for angle in (0, 90, 270, 180):
+    best_rank = (0, 0, 0, 0.0)
+    for angle in (0, 180, 90, 270):
         rotated = image.rotate(angle, expand=True) if angle else image
         # The supplied scans are under 1000 px wide; modest enlargement keeps
         # the English letter shapes legible to the OCR recognizer.
         ocr_image = rotated
         if rotated.width < 1600:
             ocr_image = rotated.resize((round(rotated.width * 1.5), round(rotated.height * 1.5)))
-        name, number, name_score, id_score = fields_from_lines(read_lines(ocr_image, engine))
-        if (bool(name) + bool(number), name_score + id_score) > (bool(best[0]) + bool(best[1]), best[2] + best[3]):
+        lines = read_lines(ocr_image, engine)
+        name, number, name_score, id_score = fields_from_lines(lines)
+        if number:
+            # Compare both scales: scans may lose the small Name label,
+            # continuation, or spaces between words at either resolution.
+            enlarged = rotated.resize((rotated.width * 2, rotated.height * 2))
+            larger_lines = read_lines(enlarged, engine)
+            # Preserve word spacing from the first pass when both passes read
+            # the same letters but the larger pass joins adjacent words.
+            for larger in larger_lines:
+                for original in lines:
+                    if (re.sub(r"\s+", "", larger.text).casefold()
+                            == re.sub(r"\s+", "", original.text).casefold()
+                            and original.text.count(" ") > larger.text.count(" ")):
+                        larger.text = original.text
+                        break
+            retry = fields_from_lines(larger_lines)
+            if retry[0] and (not name or len(retry[0].split()) >= len(name.split())):
+                name, name_score = retry[0], retry[2]
+            if retry[1] and retry[3] > id_score:
+                number, id_score = retry[1], retry[3]
+            lines = larger_lines
+        upright_labels = sum(bool(re.search(
+            r"\b(?:Name|ID\s*Number|Date\s*of\s*Birth|Nationality|"
+            r"Resident\s*Identity|UNITED\s*ARAB\s*EMIRATES)\b",
+            line.text, re.IGNORECASE,
+        )) for line in lines)
+        # OCR also normalizes vertical text crops. A card front should be
+        # landscape, so a sideways recognition must not end the search early.
+        landscape = rotated.width >= rotated.height
+        rank = (bool(name) + bool(number), int(landscape), upright_labels, name_score + id_score)
+        if rank > best_rank:
             best = (name, number, name_score, id_score, rotated)
-        if name and number and min(name_score, id_score) >= 0.85:
+            best_rank = rank
+        if landscape and name and number and min(name_score, id_score) >= 0.85:
             break
     if not best[0] or not best[1]:
         enlarged = best[4].resize((best[4].width * 2, best[4].height * 2))
@@ -150,7 +230,7 @@ def portrait_crop(image: Image.Image, classifier: cv2.CascadeClassifier):
     return image.crop(tuple(round(value) for value in box))
 
 
-def unique_photo_path(folder: Path, name: str, used: set[str]) -> Path:
+def unique_jpg_path(folder: Path, name: str, used: set[str]) -> Path:
     base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name).strip(" .")[:120] or "Unknown"
     candidate = folder / f"{base}.jpg"
     counter = 2
@@ -165,16 +245,16 @@ def write_workbook(rows: list[Result], path: Path) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Emirates IDs"
-    sheet.append(["Source file", "Page", "English name", "Emirates ID number", "Photo", "Status", "Details"])
+    sheet.append(["Source file", "Page", "English name", "Emirates ID number", "Photo", "ID image", "Status", "Details"])
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="17365D")
         cell.font = Font(color="FFFFFF", bold=True)
     for row in rows:
-        sheet.append([row.source, row.page, row.name, row.id_number, row.photo, row.status, row.details])
+        sheet.append([row.source, row.page, row.name, row.id_number, row.photo, row.id_image, row.status, row.details])
         sheet.cell(sheet.max_row, 4).number_format = "@"
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    for column, width in {"A": 34, "B": 8, "C": 48, "D": 26, "E": 52, "F": 12, "G": 50}.items():
+    for column, width in {"A": 34, "B": 8, "C": 48, "D": 26, "E": 52, "F": 52, "G": 12, "H": 50}.items():
         sheet.column_dimensions[column].width = width
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
@@ -184,14 +264,17 @@ def process(input_dir: Path, output_dir: Path) -> list[Result]:
     if not input_dir.is_dir():
         raise FileNotFoundError(f"Input folder does not exist: {input_dir}")
     photos_dir = output_dir / "photos"
+    id_cards_dir = output_dir / "id_cards"
     photos_dir.mkdir(parents=True, exist_ok=True)
+    id_cards_dir.mkdir(parents=True, exist_ok=True)
     engine = RapidOCR()
     classifier = cv2.CascadeClassifier(str(FACE_MODEL))
     if classifier.empty():
         raise RuntimeError(f"Could not load face model: {FACE_MODEL}")
 
     rows = []
-    used_names = set()
+    used_photo_names = set()
+    used_id_card_names = set()
     files = sorted(path for path in input_dir.iterdir() if path.is_file() and (path.suffix.lower() in IMAGE_EXTENSIONS or path.suffix.lower() == ".pdf"))
     for path in files:
         try:
@@ -199,7 +282,24 @@ def process(input_dir: Path, output_dir: Path) -> list[Result]:
                 row = Result(source=path.name, page=page_number)
                 try:
                     row.name, row.id_number, name_score, id_score, oriented = extract_fields(image, engine)
-                    photo = portrait_crop(oriented, classifier)
+
+                    # A PDF page is considered a valid Emirates ID page only when
+                    # both the English name and Emirates ID number are detected.
+                    # Invalid PDF pages are ignored completely: they are not saved
+                    # as images and they are not written to the workbook.
+                    is_valid_id_page = bool(row.name and row.id_number)
+                    if path.suffix.lower() == ".pdf" and not is_valid_id_page:
+                        missing = []
+                        if not row.name:
+                            missing.append("English name")
+                        if not row.id_number:
+                            missing.append("Emirates ID number")
+                        print(
+                            f"{path.name} page {page_number}: skipped invalid PDF page"
+                            f" | missing {', '.join(missing) or 'required fields'}"
+                        )
+                        continue
+
                     issues = []
                     if not row.name:
                         issues.append("English name not found")
@@ -209,15 +309,31 @@ def process(input_dir: Path, output_dir: Path) -> list[Result]:
                         issues.append("Emirates ID number not found")
                     elif id_score < 0.85:
                         issues.append("Low confidence ID number")
+
+                    # Save the complete input ID/page as <person name>.jpg whenever
+                    # the required ID fields were successfully detected.
+                    if is_valid_id_page:
+                        id_target = unique_jpg_path(id_cards_dir, row.name, used_id_card_names)
+                        oriented.save(id_target, "JPEG", quality=95)
+                        row.id_image = str(id_target)
+
+                    photo = portrait_crop(oriented, classifier)
                     if photo is None:
                         issues.append("Portrait not found")
                     elif row.name:
-                        target = unique_photo_path(photos_dir, row.name, used_names)
+                        target = unique_jpg_path(photos_dir, row.name, used_photo_names)
                         photo.save(target, "JPEG", quality=95)
                         row.photo = str(target)
+
                     row.status = "ok" if not issues else "review"
                     row.details = "; ".join(issues)
                 except Exception as exc:
+                    if path.suffix.lower() == ".pdf":
+                        print(
+                            f"{path.name} page {page_number}: skipped PDF page due to error"
+                            f" | {type(exc).__name__}: {exc}"
+                        )
+                        continue
                     row.status = "error"
                     row.details = f"{type(exc).__name__}: {exc}"
                 rows.append(row)
