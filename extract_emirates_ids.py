@@ -250,7 +250,8 @@ def write_workbook(rows: list[Result], path: Path) -> None:
         cell.fill = PatternFill("solid", fgColor="17365D")
         cell.font = Font(color="FFFFFF", bold=True)
     for row in rows:
-        sheet.append([row.source, row.page, row.name, row.id_number, row.photo, row.id_image, row.status, row.details])
+        excel_id_number = row.id_number.replace("-", "")
+        sheet.append([row.source, row.page, row.name, excel_id_number, row.photo, row.id_image, row.status, row.details])
         sheet.cell(sheet.max_row, 4).number_format = "@"
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions

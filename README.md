@@ -43,7 +43,7 @@ output/
 | --- | --- |
 | Source file, Page | Where the card came from |
 | English name | Title-cased name |
-| Emirates ID number | Formatted as `784-XXXX-XXXXXXX-X` |
+| Emirates ID number | Saved as digits only (`784XXXXXXXXXXXX`) |
 | Photo, ID image | Paths to the saved JPEGs |
 | Status | `ok`, `review`, or `error` |
 | Details | Why a row needs review, e.g. `Low confidence name`, `Portrait not found` |
